@@ -1,0 +1,668 @@
+<!DOCTYPE html>
+<html lang="mn">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Car-Агуулах — 0 Эрсдэл, Хязгааргүй Ашиг</title>
+    <!-- Tailwind CSS (CDN) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Inter Font -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #0d1117; /* GitHub Dark Mode Background */
+            color: #c9d1d9; /* Light gray text */
+        }
+        .header-bg {
+            background-image: linear-gradient(to right, #1f2937, #111827);
+        }
+        .card-bg {
+            background-color: #161b22; /* Slightly lighter dark background for cards */
+        }
+        .shadow-neon {
+            box-shadow: 0 0 10px rgba(0, 191, 255, 0.5), 0 0 20px rgba(0, 191, 255, 0.3);
+        }
+        .ref-id-box {
+            letter-spacing: 0.25em;
+        }
+        .loading-animation {
+            border: 4px solid rgba(255, 255, 255, 0.3);
+            border-radius: 50%;
+            border-top: 4px solid #3b82f6;
+            width: 20px;
+            height: 20px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body class="min-h-screen">
+    
+    <!-- Application Notification Box -->
+    <div id="app-notification" class="fixed bottom-4 right-4 bg-blue-600/90 text-white p-4 rounded-lg shadow-xl 
+        transition-all duration-300 transform opacity-0 scale-95 z-50 pointer-events-none">
+        Линк амжилттай хуулагдлаа!
+    </div>
+
+    <!-- Firebase Initialization and Logic Script -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, setLogLevel, doc, getDoc, setDoc, collection, query, onSnapshot, where } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Firebase Log Level for Debugging
+        setLogLevel('Debug');
+
+        // Global Variables
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-car-aguulah-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let db;
+        let auth;
+        let userId = 'Guest';
+        let currentUserRefId = null;
+
+        const getSalesMemberDocPath = (uid) => doc(db, 'artifacts', appId, 'users', uid, 'sales_members', uid);
+        const getPublicCarCollectionRef = () => collection(db, 'artifacts', appId, 'public', 'data', 'cars');
+        const getPublicSalesCollectionRef = () => collection(db, 'artifacts', appId, 'public', 'data', 'sales');
+
+
+        const generateRefId = () => {
+            const characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+            let result = '';
+            const length = 6;
+            for (let i = 0; i < length; i++) {
+                result += characters.charAt(Math.floor(Math.random() * characters.length));
+            }
+            return result;
+        };
+        
+        // --- UTILITY FUNCTIONS ---
+
+        const showNotification = (message, isError = false) => {
+            const notification = document.getElementById('app-notification');
+            if (!notification) return;
+            
+            notification.textContent = message;
+            
+            notification.classList.remove('opacity-0', 'scale-95', 'bg-red-600/90', 'bg-blue-600/90');
+            
+            if (isError) {
+                notification.classList.add('opacity-100', 'scale-100', 'bg-red-600/90');
+            } else {
+                notification.classList.add('opacity-100', 'scale-100', 'bg-blue-600/90');
+            }
+
+            setTimeout(() => {
+                notification.classList.remove('opacity-100', 'scale-100', 'bg-red-600/90', 'bg-blue-600/90');
+                notification.classList.add('opacity-0', 'scale-95');
+            }, 3000);
+        };
+
+        /**
+         * Борлуулалтын линкийг үүсгээд Clipboard руу хуулах
+         */
+        window.generateAndCopyLink = (refId, carId) => {
+            if (!refId || !carId) {
+                showNotification("Алдаа: Ref ID эсвэл Car ID дутуу байна.", true);
+                return;
+            }
+            
+            // NOTE: Энэ нь симуляц линк бөгөөд таны Ref ID, Car ID-г агуулна.
+            const baseUrl = "https://car-aguulah.mn/sale";
+            const shareLink = `${baseUrl}?ref=${refId}&car=${carId}`;
+            
+            // Clipboard-д хуулах (iFrame-д ажиллах боломжтой хуучин арга)
+            try {
+                const tempInput = document.createElement('input');
+                tempInput.value = shareLink;
+                document.body.appendChild(tempInput);
+                tempInput.select();
+                document.execCommand('copy');
+                document.body.removeChild(tempInput);
+
+                showNotification(`✅ Линк хуулагдлаа: ${shareLink.substring(0, 30)}...`);
+            } catch (err) {
+                showNotification("Алдаа: Линк хуулах боломжгүй.", true);
+                console.error('Линк хуулахад алдаа гарлаа:', err);
+            }
+        };
+
+
+        // --- INVENTORY RENDER LOGIC ---
+
+        const renderCars = (cars) => {
+            const inventoryList = document.getElementById('inventory-list');
+            if (!inventoryList) return;
+
+            const isRegistered = !!currentUserRefId;
+
+            if (cars.length === 0) {
+                inventoryList.innerHTML = '<p class="text-center text-gray-500 py-10">Одоогоор нийлүүлэгчдээс ирсэн машин байхгүй байна.</p>';
+                return;
+            }
+
+            inventoryList.innerHTML = cars.map(car => {
+                const linkButton = isRegistered ? `
+                    <button class="mt-4 w-full bg-pink-600 hover:bg-pink-700 text-white font-semibold py-2 rounded-lg transition duration-200"
+                            onclick="window.generateAndCopyLink('${currentUserRefId}', '${car.id}')">
+                        🔗 Борлуулалтын Линк Хуулах
+                    </button>
+                ` : `
+                    <button class="mt-4 w-full bg-gray-600 text-gray-400 font-semibold py-2 rounded-lg cursor-not-allowed" 
+                            onclick="showNotification('Борлуулалтын линк үүсгэхийн тулд бүртгэлээ баталгаажуулна уу.', true)">
+                        Эрх аваагүй
+                    </button>
+                `;
+
+                return `
+                    <div class="card-bg p-6 rounded-xl shadow-md border border-gray-700 hover:border-pink-500 transition duration-300">
+                        <h5 class="text-xl font-bold text-white mb-2">${car.make} ${car.model} (${car.year})</h5>
+                        <p class="text-2xl font-extrabold text-blue-400 mb-3">₮${car.price.toLocaleString('en-US')}</p>
+                        <p class="text-sm text-gray-400">Байршил: ${car.location}</p>
+                        <p class="text-sm text-gray-400">Provider ID: ${car.providerId}</p>
+                        <span class="inline-block mt-3 text-xs font-semibold px-3 py-1 rounded-full ${car.status === 'Available' ? 'bg-green-900/50 text-green-400' : 'bg-red-900/50 text-red-400'}">
+                            ${car.status === 'Available' ? 'Бэлэн' : 'Зарагдсан'}
+                        </span>
+                        ${linkButton}
+                    </div>
+                `;
+            }).join('');
+        };
+        
+        const setupInventoryListener = () => {
+            const carsCollectionRef = getPublicCarCollectionRef();
+            
+            onSnapshot(carsCollectionRef, (snapshot) => {
+                const cars = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                renderCars(cars);
+                
+                // Mock Car Data Initialization (Run only once if no data exists)
+                if (cars.length === 0) {
+                    console.log("Mock Car Data үүсгэж байна...");
+                    setDoc(doc(carsCollectionRef, "car_1"), { make: "Toyota", model: "Land Cruiser 300", year: 2024, price: 350000000, location: "UB", providerId: "ProvA", status: "Available" });
+                    setDoc(doc(carsCollectionRef, "car_2"), { make: "Lexus", model: "LX 600", year: 2023, price: 420000000, location: "UB", providerId: "ProvB", status: "Available" });
+                    setDoc(doc(carsCollectionRef, "car_3"), { make: "Hyundai", model: "Palisade", year: 2022, price: 120000000, location: "Darkhan", providerId: "ProvC", status: "Available" });
+                    // Mock Sale Data Initialization (Example of a sale tied to a Ref ID for demonstration)
+                    const salesCollectionRef = getPublicSalesCollectionRef();
+                    setDoc(doc(salesCollectionRef, "sale_mock_1"), { carMake: "Toyota", carModel: "Prado", carPrice: 150000000, salesMemberRefId: "DEMO1A", commissionRate: 0.05, commissionEarned: 7500000, saleDate: new Date().toISOString(), status: "Completed" });
+                    setDoc(doc(salesCollectionRef, "sale_mock_2"), { carMake: "Lexus", carModel: "RX", carPrice: 90000000, salesMemberRefId: "DEMO1A", commissionRate: 0.07, commissionEarned: 6300000, saleDate: new Date(Date.now() - 86400000).toISOString(), status: "Completed" });
+                }
+            }, (error) => {
+                console.error("Машины нөөцийг татаж чадсангүй:", error);
+                document.getElementById('inventory-list').innerHTML = '<p class="text-center text-red-400 py-10">Өгөгдөл татахад алдаа гарлаа.</p>';
+            });
+        };
+
+        // --- SALES TRACKER LOGIC ---
+
+        const renderSales = (sales) => {
+            const salesList = document.getElementById('sales-list');
+            const totalSalesDisplay = document.getElementById('total-sales-earned');
+            if (!salesList || !totalSalesDisplay) return;
+
+            if (sales.length === 0) {
+                salesList.innerHTML = '<p class="text-center text-gray-500 py-10">Таны Ref ID-гоор хийгдсэн борлуулалт одоогоор байхгүй байна.</p>';
+                totalSalesDisplay.textContent = '₮0';
+                return;
+            }
+
+            let totalEarned = 0;
+            salesList.innerHTML = sales.map(sale => {
+                totalEarned += sale.commissionEarned;
+                return `
+                    <li class="p-4 card-bg rounded-lg flex justify-between items-center border-l-4 border-green-500 mb-2">
+                        <div>
+                            <p class="text-lg font-semibold text-white">${sale.carModel} (${sale.carMake}) - ₮${sale.carPrice.toLocaleString('en-US')}</p>
+                            <p class="text-sm text-gray-400">Огноо: ${new Date(sale.saleDate).toLocaleDateString()}</p>
+                        </div>
+                        <div class="text-right">
+                            <p class="text-2xl font-bold text-green-400">₮${sale.commissionEarned.toLocaleString('en-US')}</p>
+                            <p class="text-xs text-gray-500">${(sale.commissionRate * 100).toFixed(0)}% Комисс</p>
+                        </div>
+                    </li>
+                `;
+            }).join('');
+            
+            totalSalesDisplay.textContent = '₮' + totalEarned.toLocaleString('en-US');
+        };
+
+        const setupSalesListener = (userRefId) => {
+            const salesCollectionRef = getPublicSalesCollectionRef();
+            const q = query(salesCollectionRef, where("salesMemberRefId", "==", userRefId));
+            
+            onSnapshot(q, (snapshot) => {
+                const sales = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                renderSales(sales);
+            }, (error) => {
+                console.error("Борлуулалтын мэдээлэл татаж чадсангүй:", error);
+                document.getElementById('sales-list').innerHTML = '<p class="text-center text-red-400 py-10">Өгөгдөл татахад алдаа гарлаа.</p>';
+            });
+        };
+        
+        // --- REGISTRATION LOGIC ---
+
+        const updateRegistrationUI = (status, refId = null) => {
+            const registrationCard = document.getElementById('registration-card');
+            const statusDisplay = document.getElementById('registration-status');
+            const refIdDisplay = document.getElementById('ref-id-display');
+            const refIdBox = document.getElementById('ref-id-box');
+            const registerButton = document.getElementById('register-button');
+            const salesTrackerSection = document.getElementById('sales-tracker');
+
+            salesTrackerSection.classList.add('hidden');
+            registerButton.classList.add('hidden');
+            refIdBox.classList.add('hidden');
+            statusDisplay.classList.remove('text-yellow-400', 'text-green-400');
+            registrationCard.classList.remove('animate-pulse');
+
+            if (status === 'loading') {
+                statusDisplay.innerHTML = '<div class="loading-animation inline-block mr-2"></div> Төлвийг шалгаж байна...';
+                statusDisplay.classList.add('text-yellow-400');
+                registrationCard.classList.add('animate-pulse');
+            } else if (status === 'registered') {
+                statusDisplay.innerHTML = '✅ **Амжилттай Бүртгүүлсэн.** Та бол албан ёсны Sales Member!';
+                statusDisplay.classList.add('text-green-400');
+                refIdDisplay.textContent = refId;
+                refIdBox.classList.remove('hidden');
+                salesTrackerSection.classList.remove('hidden');
+                currentUserRefId = refId;
+                setupSalesListener(refId); 
+                renderCars(document.getElementById('inventory-list').querySelectorAll('.card-bg')); // Refresh cars to show buttons
+            } else if (status === 'unregistered') {
+                statusDisplay.textContent = '❌ Та бүртгэлгүй байна. Эрхээ аваад, борлуулалтаа эхлүүлээрэй.';
+                statusDisplay.classList.add('text-yellow-400');
+                registerButton.classList.remove('hidden');
+                currentUserRefId = null;
+                // If there were cars rendered before, re-render them without the link button
+                const currentCars = Array.from(document.getElementById('inventory-list').children).map(el => ({ 
+                    id: el.querySelector('button') ? el.querySelector('button').onclick.toString().match(/'(car_\d+)'/)?.[1] : null, 
+                    make: el.querySelector('h5')?.textContent.split(' ')[0],
+                    model: el.querySelector('h5')?.textContent.split(' ')[1],
+                    year: el.querySelector('h5')?.textContent.match(/\((\d{4})\)/)?.[1],
+                    price: parseFloat(el.querySelector('p:nth-child(3)')?.textContent.replace(/[^0-9.]/g, '')),
+                    location: el.querySelector('p:nth-child(4)')?.textContent.split(': ')[1],
+                    providerId: el.querySelector('p:nth-child(5)')?.textContent.split(': ')[1],
+                    status: el.querySelector('span')?.textContent === 'Бэлэн' ? 'Available' : 'Sold',
+                })).filter(car => car.id);
+                if (currentCars.length > 0) renderCars(currentCars);
+            }
+        };
+        
+        const checkUserStatus = async (uid) => {
+            updateRegistrationUI('loading');
+            try {
+                const userDocRef = getSalesMemberDocPath(uid);
+                const docSnap = await getDoc(userDocRef);
+
+                if (docSnap.exists()) {
+                    const data = docSnap.data();
+                    if (data.isRegistered) {
+                        updateRegistrationUI('registered', data.refId);
+                        return;
+                    }
+                }
+                updateRegistrationUI('unregistered');
+            } catch (error) {
+                console.error("Төлөв шалгахад алдаа гарлаа:", error);
+                updateRegistrationUI('unregistered'); 
+            }
+        };
+
+        window.registerSalesMember = async () => {
+            const button = document.getElementById('register-button');
+            const originalText = button.textContent;
+            button.disabled = true;
+            button.textContent = 'Бүртгүүлж байна...';
+            
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            
+            try {
+                // Mock Sales-үүдтэй холбогдож байгааг харуулахын тулд "DEMO1A" Ref ID-г ашиглаж байна.
+                const newRefId = "DEMO1A"; 
+                const userDocRef = getSalesMemberDocPath(userId);
+                
+                const registrationData = {
+                    userId: userId,
+                    refId: newRefId,
+                    isRegistered: true,
+                    registrationDate: new Date().toISOString(),
+                    feePaid: 250000,
+                    tierLevel: 2, 
+                };
+                
+                await setDoc(userDocRef, registrationData);
+                
+                updateRegistrationUI('registered', newRefId);
+                showNotification(`✅ Бүртгэл амжилттай. Таны Ref ID: ${newRefId}`);
+
+            } catch (error) {
+                console.error("Бүртгэлд алдаа гарлаа:", error);
+                showNotification("Бүртгэлд алдаа гарлаа.", true);
+            } finally {
+                button.disabled = false;
+                button.textContent = originalText;
+            }
+        };
+
+        const initFirebase = async () => {
+            if (!firebaseConfig) {
+                document.getElementById('firebase-status').textContent = 'Алдаа: Firebase холболтгүй.';
+                return;
+            }
+
+            try {
+                const app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+                document.getElementById('firebase-status').textContent = 'Систем бэлэн. (Firebase Connected)';
+                setupInventoryListener(); 
+
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+
+                onAuthStateChanged(auth, (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        document.getElementById('user-id-display').textContent = `Хэрэглэгчийн ID: ${userId}`;
+                        document.getElementById('firebase-status').classList.remove('text-red-400');
+                        document.getElementById('firebase-status').classList.add('text-green-400');
+                        checkUserStatus(userId); 
+                    } else {
+                        userId = 'Anonymous-' + crypto.randomUUID();
+                        document.getElementById('user-id-display').textContent = `Хэрэглэгчийн ID: ${userId} (Түр зуурын)`;
+                        updateRegistrationUI('unregistered');
+                    }
+                });
+
+            } catch (error) {
+                console.error("Firebase холболтод алдаа гарлаа:", error);
+                document.getElementById('firebase-status').textContent = `Алдаа: ${error.message}`;
+                document.getElementById('firebase-status').classList.remove('text-green-400');
+                document.getElementById('firebase-status').classList.add('text-red-400');
+            }
+        };
+
+        window.onload = initFirebase;
+    </script>
+    
+    <!-- Header/Navigation Bar -->
+    <header class="header-bg p-4 sticky top-0 z-10 border-b border-blue-600 shadow-xl">
+        <div class="max-w-7xl mx-auto flex justify-between items-center">
+            <h1 class="text-3xl font-extrabold text-blue-400 tracking-wider">
+                <span class="text-white">🚗</span> Car-Агуулах
+            </h1>
+            <nav class="hidden md:flex space-x-6 text-sm font-medium">
+                <a href="#inventory" class="hover:text-blue-400 transition duration-300">Машины Нөөц</a>
+                <a href="#registration-status-section" class="hover:text-blue-400 transition duration-300">Бүртгэл</a>
+                <a href="#sales-tracker" class="hover:text-blue-400 transition duration-300">Борлуулалтын Хяналт</a>
+                <a href="#provider" class="hover:text-blue-400 transition duration-300">Нийлүүлэгч</a>
+            </nav>
+        </div>
+    </header>
+
+    <!-- Hero Section - Core Philosophy -->
+    <section id="philosophy" class="text-center py-20 px-4 md:py-32 bg-gray-900 border-b border-gray-700">
+        <div class="max-w-4xl mx-auto">
+            <p class="text-sm font-semibold text-blue-400 uppercase tracking-widest mb-3">Shared Economic System in Automotive</p>
+            <h2 class="text-5xl md:text-7xl font-extrabold leading-tight text-white mb-6">
+                <span class="shadow-neon px-2 rounded-lg">0 ЭРСДЭЛ,</span> <br class="block md:hidden"> ХЯЗГААРГҮЙ АШИГ.
+            </h2>
+            <p class="text-xl md:text-2xl text-gray-400 mb-8 max-w-2xl mx-auto">
+                Хүссэн хэн бүхэн ямар ч хөрөнгө шаардлагагүйгээр **онлайнаар нэмэлт орлого** олох боломжтой систем.
+            </p>
+            <div class="flex flex-col sm:flex-row justify-center space-y-4 sm:space-y-0 sm:space-x-4">
+                <button onclick="document.getElementById('registration-status-section').scrollIntoView({behavior: 'smooth'})" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-8 rounded-xl transition duration-300 transform hover:scale-105 shadow-lg shadow-blue-500/50">
+                    Одоо Нэгдэх
+                </button>
+            </div>
+        </div>
+    </section>
+
+    <!-- Registration Status Section -->
+    <section id="registration-status-section" class="py-16 px-4 md:py-24 max-w-4xl mx-auto">
+        <h3 class="text-4xl font-bold text-center mb-12 text-white">🔑 Бүртгэлийн Төлөв ба Ref ID</h3>
+        
+        <div id="registration-card" class="card-bg p-8 rounded-2xl shadow-lg border border-blue-600">
+            <p class="text-lg font-semibold mb-4 text-center" id="registration-status">
+                <!-- Status will be updated by JS -->
+            </p>
+
+            <!-- Ref ID Display Box (Hidden by default) -->
+            <div id="ref-id-box" class="hidden bg-gray-800 p-6 rounded-xl text-center mt-4 border border-green-500">
+                <p class="text-lg text-gray-400 mb-2">Таны Борлуулалтыг Хянах ID (Ref ID):</p>
+                <code id="ref-id-display" class="text-5xl font-extrabold text-green-400 ref-id-box select-all">
+                    ...
+                </code>
+                <p class="text-sm text-gray-500 mt-2">Энэхүү ID-г ашиглан борлуулалтын линк, сувгаа үүсгээрэй.</p>
+            </div>
+
+            <!-- Registration Button (Hidden by default) -->
+            <button id="register-button" onclick="registerSalesMember()" class="hidden w-full bg-yellow-600 hover:bg-yellow-700 text-gray-900 font-bold py-3 mt-6 rounded-xl transition duration-300 transform hover:scale-[1.02]">
+                ₮250,000 төлөн, Борлуулагчийн Эрх Авах (Төлбөрийн Симуляц)
+            </button>
+        </div>
+    </section>
+
+    <!-- Sales Tracking Section (Hidden until registered) -->
+    <section id="sales-tracker" class="py-16 px-4 md:py-24 max-w-7xl mx-auto hidden bg-gray-900 border-t border-gray-700">
+        <h3 class="text-4xl font-bold text-center mb-12 text-white">💰 Борлуулалтын Хяналт ба Орлого</h3>
+        
+        <div class="grid md:grid-cols-3 gap-8">
+            <!-- Total Earnings Card -->
+            <div class="card-bg p-6 rounded-2xl shadow-neon border border-blue-600 md:col-span-1 text-center">
+                <p class="text-lg text-gray-400 uppercase tracking-wider mb-2">Нийт Олсон Орлого</p>
+                <p id="total-sales-earned" class="text-5xl font-extrabold text-yellow-300">
+                    ₮0
+                </p>
+                <p class="text-sm text-gray-500 mt-2">Комиссоор олсон нийт дүн</p>
+            </div>
+            
+            <!-- Sales List -->
+            <div class="card-bg p-6 rounded-2xl shadow-lg border border-gray-700 md:col-span-2">
+                <h4 class="text-2xl font-bold text-white mb-4">Хийгдсэн Борлуулалтууд</h4>
+                <ul id="sales-list" class="space-y-3">
+                    <!-- Sales items will be rendered here by JS -->
+                    <p class="text-center text-gray-500 py-10">Түр хүлээнэ үү, өгөгдөл татаж байна...</p>
+                </ul>
+            </div>
+        </div>
+    </section>
+
+    <!-- Car Inventory Section -->
+    <section id="inventory" class="py-16 px-4 md:py-24 max-w-7xl mx-auto">
+        <h3 class="text-4xl font-bold text-center mb-12 text-white">📦 Car-Агуулахын Нөөц (Provider Cars)</h3>
+        
+        <div id="inventory-list" class="grid sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+            <!-- Car items will be rendered here by JS -->
+            <p class="text-center text-gray-500 py-10 sm:col-span-2 lg:col-span-3 xl:col-span-4">Түр хүлээнэ үү, машины мэдээлэл татаж байна...</p>
+        </div>
+    </section>
+
+    <!-- Sales Member System - The Opportunity (Unchanged) -->
+    <section id="sales" class="py-16 px-4 md:py-24 max-w-7xl mx-auto">
+        <h3 class="text-4xl font-bold text-center mb-12 text-white">💼 Борлуулагчийн Эрх: Таны Бизнес</h3>
+        
+        <div class="grid md:grid-cols-2 gap-8">
+            <!-- Left Card: Fee and Core Value -->
+            <div class="card-bg p-8 rounded-2xl shadow-lg border border-gray-700 hover:border-blue-500 transition duration-500">
+                <h4 class="text-2xl font-semibold text-blue-400 mb-4">“Та бизнесгүй байсан ч борлуулагч байж болно.”</h4>
+                <p class="text-gray-400 mb-6">
+                    Та автомашин худалдаж авах, тээвэрлэх, засварлах **ЯМАР Ч ЭРСДЭЛГҮЙ**. Таны хийх зүйл бол зөвхөн: **БОРЛУУЛАХ**.
+                </p>
+                <div class="bg-gray-800 p-4 rounded-lg">
+                    <p class="text-lg font-bold text-white">✅ ЭЛСЭХ ЭРХИЙН ТӨЛБӨР (Жилийн):</p>
+                    <p class="text-4xl font-extrabold text-green-400 mt-1">₮250,000</p>
+                </div>
+            </div>
+
+            <!-- Right Card: Tier System -->
+            <div class="card-bg p-8 rounded-2xl shadow-lg border border-gray-700 hover:border-blue-500 transition duration-500">
+                <h4 class="text-2xl font-semibold text-blue-400 mb-4">📈 Tier Урамшууллын Систем</h4>
+                <p class="text-gray-400 mb-6">Хэдий чинээ их машин зарна — төдий чинээ ашиг. Таны идэвх нэмэгдэх тусам орлогын хувь хязгааргүй өснө.</p>
+                
+                <div class="space-y-3">
+                    <div class="p-4 bg-blue-900/30 rounded-lg flex justify-between items-center"><span class="font-bold text-xl text-white">Tier 1 (Starter)</span><span class="text-lg font-extrabold text-yellow-300">5% Ашиг</span></div>
+                    <div class="p-4 bg-blue-900/50 rounded-lg flex justify-between items-center"><span class="font-bold text-xl text-white">Tier 2 (Pro)</span><span class="text-lg font-extrabold text-yellow-300">7% Ашиг</span></div>
+                    <div class="p-4 bg-blue-900/70 rounded-lg flex justify-between items-center shadow-lg shadow-blue-500/30"><span class="font-bold text-xl text-white">Tier 3 (Elite)</span><span class="text-lg font-extrabold text-yellow-300">10% Ашиг</span></div>
+                </div>
+            </div>
+        </div>
+    </section>
+    
+    <!-- Commission Calculator - Interactive Element (Unchanged) -->
+    <section id="calculator-section" class="py-16 px-4 md:py-24 max-w-4xl mx-auto">
+        <h3 class="text-4xl font-bold text-center mb-12 text-white">🧮 Орлого Тооцоолох</h3>
+        
+        <div class="card-bg p-8 rounded-2xl shadow-neon border border-blue-600">
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+                <div>
+                    <label for="car-price" class="block text-sm font-medium text-gray-400 mb-2">Машины үнэ (₮)</label>
+                    <input type="number" id="car-price" value="50000000" min="1000000" class="w-full p-3 rounded-lg bg-gray-800 border border-gray-600 text-white focus:border-blue-500" oninput="calculateCommission()">
+                </div>
+                <div>
+                    <label for="tier-level" class="block text-sm font-medium text-gray-400 mb-2">Таны Tier Түвшин</label>
+                    <select id="tier-level" class="w-full p-3 rounded-lg bg-gray-800 border border-gray-600 text-white focus:border-blue-500" onchange="calculateCommission()">
+                        <option value="0.05">Tier 1 (5%)</option>
+                        <option value="0.07">Tier 2 (7%)</option>
+                        <option value="0.10">Tier 3 (10%)</option>
+                    </select>
+                </div>
+                <div>
+                    <label for="commission-rate" class="block text-sm font-medium text-gray-400 mb-2">Урамшууллын хувь (%)</label>
+                    <input type="text" id="commission-rate" value="5%" class="w-full p-3 rounded-lg bg-gray-800 border border-gray-600 text-white cursor-default" readonly>
+                </div>
+            </div>
+
+            <div class="text-center bg-blue-900/50 p-6 rounded-xl">
+                <p class="text-xl text-gray-300 mb-2">Таны нэг борлуулалтаас олох цэвэр орлого:</p>
+                <p id="commission-output" class="text-6xl font-extrabold text-yellow-300">₮2,500,000</p>
+                <p class="text-gray-400 mt-2">"Хязгааргүй" амлалт нь таны өдөрт, сард хийх борлуулалтын тооноос хамаарна.</p>
+            </div>
+        </div>
+    </section>
+
+    <!-- Provider/Supplier System - The Advantage (Unchanged) -->
+    <section id="provider" class="py-16 px-4 md:py-24 max-w-7xl mx-auto bg-gray-900 border-t border-gray-700">
+        <div class="grid md:grid-cols-2 gap-12 items-center">
+            <div class="order-2 md:order-1">
+                <h3 class="text-4xl font-bold text-white mb-6">🏭 Provider / Supplier-ийн Систем</h3>
+                <h4 class="text-3xl font-extrabold text-blue-400 mb-6">"Борлуулах хүчээ 1000 дахин өсгө."</h4>
+                <p class="text-gray-400 mb-6">
+                    Таны (ченж/диллер) автомашины нөөц орон даяар тархсан 1000+ идэвхтэй sales member-ээр дамжин борлуулагдах боломжтой болно.
+                </p>
+                
+                <div class="bg-gray-800 p-4 rounded-lg">
+                    <p class="text-lg font-bold text-white">Төлөх Шимтгэл:</p>
+                    <p class="text-3xl font-extrabold text-pink-400 mt-1">5% – 10%</p>
+                    <p class="text-xs text-gray-500 mt-2">
+                        *Зөвхөн амжилттай хийгдсэн борлуулалтаас шимтгэл авна.
+                    </p>
+                </div>
+            </div>
+            <div class="order-1 md:order-2">
+                <!-- Simple SVG Graphic to represent 1000x sales force -->
+                <svg viewBox="0 0 100 100" class="w-full h-auto text-blue-500">
+                    <defs>
+                        <radialGradient id="grad1" cx="50%" cy="50%" r="50%">
+                            <stop offset="0%" style="stop-color:#3b82f6;stop-opacity:1" />
+                            <stop offset="100%" style="stop-color:#1e3a8a;stop-opacity:1" />
+                        </radialGradient>
+                    </defs>
+                    <!-- Center Car (Provider) -->
+                    <circle cx="50" cy="50" r="10" fill="url(#grad1)" stroke="#dbeafe" stroke-width="0.5"/>
+                    <text x="50" y="52" text-anchor="middle" font-size="5" fill="#fff" font-weight="bold">SUPPLIER</text>
+                    
+                    <!-- Sales Members (12 dots) -->
+                    <g fill="#60a5fa">
+                        <circle cx="90" cy="50" r="2"/>
+                        <circle cx="10" cy="50" r="2"/>
+                        <circle cx="50" cy="10" r="2"/>
+                        <circle cx="50" cy="90" r="2"/>
+                        <circle cx="75" cy="25" r="2"/>
+                        <circle cx="25" cy="75" r="2"/>
+                        <circle cx="75" cy="75" r="2"/>
+                        <circle cx="25" cy="25" r="2"/>
+                        <!-- More dots for the illusion of 'many' -->
+                        <circle cx="85" cy="65" r="2"/>
+                        <circle cx="15" cy="35" r="2"/>
+                        <circle cx="65" cy="85" r="2"/>
+                        <circle cx="35" cy="15" r="2"/>
+                    </g>
+                    
+                    <!-- Lines connecting Supplier to Sales Members -->
+                    <g stroke="#3b82f6" stroke-width="0.3">
+                        <line x1="50" y1="50" x2="90" y2="50"/>
+                        <line x1="50" y1="50" x2="10" y2="50"/>
+                        <line x1="50" y1="50" x2="50" y2="10"/>
+                        <line x1="50" y1="50" x2="50" y2="90"/>
+                        <line x1="50" y1="50" x2="75" y2="25"/>
+                        <line x1="50" y1="50" x2="25" y2="75"/>
+                        <line x1="50" y1="50" x2="75" y2="75"/>
+                        <line x1="50" y1="50" x2="25" y2="25"/>
+                        <!-- More lines -->
+                        <line x1="50" y1="50" x2="85" y2="65"/>
+                        <line x1="50" y1="50" x2="15" y2="35"/>
+                        <line x1="50" y1="50" x2="65" y2="85"/>
+                        <line x1="50" y1="50" x2="35" y2="15"/>
+                    </g>
+                    
+                    <text x="50" y="40" text-anchor="middle" font-size="4" fill="#60a5fa">1000+ SALES FORCE</text>
+                </svg>
+            </div>
+        </div>
+    </section>
+
+
+    <!-- Footer -->
+    <footer class="bg-gray-800 border-t border-gray-700 mt-10 p-6">
+        <div class="max-w-7xl mx-auto text-center text-sm text-gray-500">
+            <p class="mb-2">© 2025 Car-Агуулах. Бүх эрх хуулиар хамгаалагдсан. | Shared Economic System & Digital Revenue Platform.</p>
+            <p id="firebase-status" class="text-sm text-yellow-500">Системийг ачаалж байна...</p>
+            <p id="user-id-display" class="text-xs mt-1"></p>
+        </div>
+    </footer>
+
+    <!-- JavaScript for Commission Calculator -->
+    <script>
+        function calculateCommission() {
+            const priceInput = document.getElementById('car-price');
+            const tierSelect = document.getElementById('tier-level');
+            const commissionRateDisplay = document.getElementById('commission-rate');
+            const commissionOutput = document.getElementById('commission-output');
+
+            let price = parseInt(priceInput.value.replace(/[^0-9]/g, ''));
+            if (isNaN(price) || price < 0) {
+                price = 0;
+            }
+            priceInput.value = price; 
+
+            const rate = parseFloat(tierSelect.value);
+            const ratePercent = (rate * 100).toFixed(0);
+            commissionRateDisplay.value = `${ratePercent}%`;
+
+            const commission = price * rate;
+
+            commissionOutput.textContent = '₮' + commission.toLocaleString('en-US');
+
+            commissionOutput.classList.remove('text-yellow-300', 'text-green-300', 'text-red-400');
+            if (ratePercent == 5) {
+                 commissionOutput.classList.add('text-yellow-300');
+            } else if (ratePercent == 7) {
+                commissionOutput.classList.add('text-green-300');
+            } else if (ratePercent == 10) {
+                commissionOutput.classList.add('text-red-400');
+            }
+        }
+        document.addEventListener('DOMContentLoaded', calculateCommission);
+    </script>
+</body>
+</html>
